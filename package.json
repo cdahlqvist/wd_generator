@@ -1,0 +1,28 @@
+{
+  "name": "wd_generator",
+  "version": "0.0.1",
+  "description": "Utility for generating Apache access logs for Logstash via TCP",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cdahlqvist/wd_generator.git"
+  },
+  "keywords": [
+    "logstash",
+    "data",
+    "generator"
+  ],
+  "author": "Christian Dahlqvist",
+  "license": "Apache License Version 2.0",
+  "bugs": {
+    "url": "https://github.com/cdahlqvist/wd_generator/issues"
+  },
+  "homepage": "https://github.com/cdahlqvist/wd_generator",
+  "dependencies": {
+    "lodash": "~2.4.1",
+    "restify": "~4.0.3"
+  }
+}

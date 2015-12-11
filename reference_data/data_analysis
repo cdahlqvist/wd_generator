@@ -1,0 +1,199 @@
+#!/usr/bin/env perl
+
+# Create dictionaries and session summaries for different types of sessions
+# map requests from different countries per UTC hour
+# Publish this information as JSON documents that can be used by node.js daemon.
+
+# Create the following maps:
+# - user_agent_map: user_agent
+# - referer_map: referer -> id (print as id -> referer)
+# - url_map: url -> size, referer_id (print as id -> url, size, referer_id)
+# - country_hour_map: utc_hour -> country, count
+# - country_ip_map: country -> ip_prefix
+# - session_map: session_id -> array(time_offset, url_id, response)
+
+use Date::Parse;
+use DateTime;
+use Data::Dumper;
+use JSON;
+use POSIX;
+
+my %user_agent_map;
+my $user_agent_id = 1;
+my %referer_map;
+my %url_map;
+my $url_id = 1;
+my %country_hour_map;
+my %requests_per_hour_map;
+$requests_per_hour_map{"total"} = 0;
+my %country_ip_map;
+my %session_map;
+my @exploit_urls;
+
+sub uniq {
+    my %seen;
+    grep !$seen{$_}++, @_;
+}
+
+foreach $line (<STDIN>) {
+    chomp;
+
+    $line =~ /^(\d+\.\d+)\.\d+\.\d+ \S* \S* \[(\S* \S*)\] \"(\S* \S* \S*)\" (\d+) (\d+) \"(.+)\" \"(.+)\" (\S*) (\S*) \S*$/;
+    my $ip_prefix = $1;
+    my $epoch = str2time($2);
+    my $url = $3;
+    my $response = $4;
+    my $size = $5;
+    my $referer = $6;
+    my $user_agent = $7;
+    my $session_id = $8;
+    my $country = $9;
+
+    my $utc_hour = floor($epoch / 3600) % 24;
+
+    if(!$requests_per_hour_map{$utc_hour}) {
+        $requests_per_hour_map{$utc_hour} = 1;
+        $requests_per_hour_map{"total"}++;
+    } else {
+        $requests_per_hour_map{$utc_hour}++;
+        $requests_per_hour_map{"total"}++;
+    }
+
+    if(!$referer_map{$referer}) {
+        $referer_map{$referer} = 1;
+    }
+
+    if(!$url_map{$url}) {
+        $url_map{$url} = $url_id;
+        $url_id++;
+    }
+
+    if(!$user_agent_map{$user_agent}) {
+        $user_agent_map{$user_agent} = 1;
+    }
+
+    if ($response == 404 && $url =~ /passwd/) {
+        push @exploit_urls, $url;
+    }
+
+    if(length $country == 3) {
+        if(!$country_hour_map{$utc_hour}) {
+            $country_hour_map{$utc_hour}{$country} = 1;
+        } else {
+            $country_hour_map{$utc_hour}{$country}++;
+        }
+
+        if(!$country_ip_map{$country}{$ip_prefix}) {
+            $country_ip_map{$country}{$ip_prefix} = 1;
+        } 
+    }
+    
+    if(!$sessions{$session_id}) {
+        $sessions{$session_id}{"min_ts"} = $epoch;
+        $sessions{$session_id}{"max_ts"} = $epoch;
+        $sessions{$session_id}{"count"} = 1;
+
+        if($response < 400) {
+            $sessions{$session_id}{"non_errors"} = 1;
+            $sessions{$session_id}{"errors"} = 0;
+        } else {
+            $sessions{$session_id}{"non_errors"} = 0;
+            $sessions{$session_id}{"errors"} = 1;
+        }
+
+        my %val;
+        $val{"url"} = $url_map{$url};
+        $val{"response"} = $response;
+        $val{"offset"} = 0;
+        $val{"size"} = $size;
+
+        push(@{$sessions{$session_id}{"requests"}}, \%val);
+    } else {
+        if ($epoch > ($sessions{$session_id}{"max_ts"} && $response == 404)) {
+            $sessions{$session_id}{"max_ts"} += floor(rand(2));
+        } elsif ($epoch > ($sessions{$session_id}{"max_ts"})) {
+            $sessions{$session_id}{"max_ts"} = $epoch;
+        }
+
+        $sessions{$session_id}{"count"}++;
+
+        if($response < 400) {
+            $sessions{$session_id}{"non_errors"}++;
+        } else {
+            $sessions{$session_id}{"errors"}++;
+        }
+
+        my %val;
+        $val{"url"} = $url_map{$url};
+        $val{"response"} = $response;
+        $val{"offset"} = $sessions{$session_id}{"max_ts"} - $sessions{$session_id}{"min_ts"};
+        $val{"size"} = $size;
+
+        push(@{$sessions{$session_id}{"requests"}}, \%val);
+    }
+}
+
+# Generate structures to dump to disk
+my %config;
+
+my @user_agents_list = keys %user_agent_map;
+$config{"user_agents"} = [ @user_agents_list ];
+$config{"user_agent_count"} = scalar @user_agents_list;
+
+my @referer_list = keys %referer_map;
+$config{"referers"} = [ @referer_list ];
+$config{"referer_count"} = scalar @referer_list;
+
+foreach $hour (keys %country_hour_map) {
+    my $total = 0;
+
+    foreach my $c (keys $country_hour_map{$hour}) {
+        $total += $country_hour_map{$hour}{$c};
+    }
+
+    foreach $c (keys $country_hour_map{$hour}) {
+        $country_hour_map{$hour}{$c} = $country_hour_map{$hour}{$c} / $total;
+    }
+}
+
+foreach my $co (keys %country_ip_map) {
+    my @ip_list = keys $country_ip_map{$co};
+
+    $country_ip_map{$co} = [ @ip_list ];
+}
+
+$config{"country_hours"} = \%country_hour_map;
+$config{"country_ips"} = \%country_ip_map;
+$config{"requests_per_hour"} = \%requests_per_hour_map;
+
+my @normal_sessions;
+
+foreach my $sid (keys %sessions) {
+    my $duration = $sessions{$sid}{"max_ts"} - $sessions{$sid}{"min_ts"};
+
+    if ($duration > 0 && $sessions{$sid}{"errors"} == 0) {
+        push(@normal_sessions, $sessions{$sid}{"requests"});
+    }
+}
+
+my $url_id_map;
+
+foreach my $u (keys %url_map) {
+    $url_id_map{$url_map{$u}} = $u;
+}
+
+$config{"urls"} = \%url_id_map;
+
+@exploit_urls = uniq(@exploit_urls);
+
+$config{"sessions"} = [ @normal_sessions ];
+$config{"session_count"} = scalar @normal_sessions;
+$config{"exploit_urls"} = \@exploit_urls;
+$config{"exploit_url_count"} = \@exploit_url_count;
+
+
+my $json = encode_json \%config;
+print "$json\n";
+
+
+#83.149.9.216 - - [28/May/2014:16:13:42 -0500] "GET /presentations/logstash-monitorama-2013/images/kibana-dashboard3.png HTTP/1.1" 200 171717 "http://semicomplete.com/presentations/logstash-monitorama-2013/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/32.0.1700.77 Safari/537.36" 4696dba90149743a52b6741a37673fe7 RUS Europe/Moscow
